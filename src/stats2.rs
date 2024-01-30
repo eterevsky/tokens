@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::tokenset::TokenSet;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TokenStats {
     pub token_set: TokenSet,
     pub total_tokens: u64,
@@ -27,6 +27,18 @@ impl TokenStats {
             token_counts: vec![0; ntokens],
             seq_counts: vec![0; nseqs],
             pair_counts: vec![0; ntokens*ntokens],
+        }
+    }
+
+    pub fn clone_without_pairs(&self) -> Self {
+        TokenStats {
+            token_set: self.token_set.clone(),
+            total_tokens: self.total_tokens,
+            initial_size: self.initial_size,
+            scanned_bytes: self.scanned_bytes,
+            token_counts: self.token_counts.clone(),
+            seq_counts: self.seq_counts.clone(),
+            pair_counts: Vec::new(),
         }
     }
 

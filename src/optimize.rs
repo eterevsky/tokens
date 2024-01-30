@@ -1,4 +1,4 @@
-use crate::batch_tokenize::tokenize_file;
+use crate::batch_tokenize::TokenizerCache;
 use crate::input::sample::Sampler;
 use crate::processing::Processing;
 use crate::stats2::TokenStats;
@@ -71,53 +71,82 @@ impl BytesOptimizer for NoopBytesOptimizer {
     }
 }
 
-fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
-    stats: &TokenStats,
-    ntokens: usize,
-    sampler: &'a S,
-    _bytes_optimizer: &BO,
-) -> Option<TokenStats> {
-    let pair_idx = (0..stats.pair_counts.len())
-        .max_by_key(|&i| stats.pair_counts[i])
-        .unwrap();
-    let itoken1 = pair_idx / stats.ntokens();
-    let itoken2 = pair_idx % stats.ntokens();
-
-    let new_token = match (
-        &stats.token_set.tokens[itoken1],
-        &stats.token_set.tokens[itoken2],
-    ) {
-        (Token::Str(s1), Token::Str(s2)) => {
-            s1.iter().chain(s2.iter()).cloned().collect::<Vec<u8>>()
+fn is_valid_token(s: &[u8]) -> bool {
+    let n = "\n".as_bytes()[0];
+    for i in 0..(s.len() - 2) {
+        if s[i] == n && s[i + 1] == n && s[i + 2] != n {
+            return false;
         }
-        _ => unreachable!(),
-    };
+    }
 
-    let mut new_token_set = stats.token_set.clone();
+    true
+}
+
+fn add_token_bpe<'a, S: Sampler<'a>>(token_set: &TokenSet, tokenizer_cache: &mut TokenizerCache<'a, S>) -> (TokenSet, Vec<u8>) {
+    let stats = tokenizer_cache.get_stats_with_pairs(token_set);
+    let mut pairs = (0..stats.pair_counts.len())
+        .filter(|&i| stats.pair_counts[i] > 0)
+        .collect::<Vec<usize>>();
+    pairs.sort_by_key(|&i| -(stats.pair_counts[i] as i64));
+
+    let mut new_token = Vec::new();
+
+    for pair_idx in pairs.iter() {
+        let itoken1 = pair_idx / stats.ntokens();
+        let itoken2 = pair_idx % stats.ntokens();
+    
+        new_token = match (
+            &stats.token_set.tokens[itoken1],
+            &stats.token_set.tokens[itoken2],
+        ) {
+            (Token::Str(s1), Token::Str(s2)) => {
+                s1.iter().chain(s2.iter()).cloned().collect::<Vec<u8>>()
+            }
+            _ => unreachable!(),
+        };
+    
+        if is_valid_token(&new_token) {
+            break;
+        }            
+    }
+
+    let mut new_token_set = token_set.clone();
     new_token_set.add_token(&new_token);
 
+    (new_token_set, new_token)
+}
+
+fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
+    token_set: &TokenSet,
+    ntokens: usize,
+    _bytes_optimizer: &BO,
+    tokenizer_cache: &mut TokenizerCache<'a, S>,
+) -> Option<TokenStats> {
+    let (new_token_set, new_token) = add_token_bpe(token_set, tokenizer_cache);
+    let stats = tokenizer_cache.get_stats(token_set);
+
     if new_token_set.ntokens() <= ntokens {
-        let new_stats = tokenize_file(&new_token_set, sampler, None);
+        let new_stats = tokenizer_cache.get_stats(&new_token_set);
         if new_stats.total_tokens < stats.total_tokens {
             println!("Added token {}", show_bytes(&new_token));
-            return Some(new_stats);
+            return Some(new_stats.clone());
         }
     } else {
         assert_eq!(new_token_set.ntokens(), ntokens + 1);
 
         if new_token_set.n_ext_tokens + new_token_set.n_long_tokens() < ntokens {
-            let new_stats = tokenize_file(&new_token_set, sampler, None);
+            let new_stats = tokenizer_cache.get_stats(&new_token_set);
             let token_set_new_bytes = BO::optimize_bytes(
                 &new_stats,
                 ntokens - new_token_set.n_ext_tokens - new_token_set.n_long_tokens(),
             );
-            let new_stats = tokenize_file(&token_set_new_bytes, sampler, None);
+            let new_stats = tokenizer_cache.get_stats(&token_set_new_bytes);
             if new_stats.total_tokens < stats.total_tokens {
                 println!(
                     "Added token {} and updated 1-byte tokens",
                     show_bytes(&new_token)
                 );
-                return Some(new_stats);
+                return Some(new_stats.clone());
             }
         }
 
@@ -130,17 +159,17 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
                     let mut newer_token_set = new_token_set.clone();
                     newer_token_set.remove_token(token_idx);
 
-                    let newer_stats = tokenize_file(&newer_token_set, sampler, None);
+                    let newer_stats = tokenizer_cache.get_stats(&newer_token_set);
                     let newer_token_set = BO::optimize_bytes(
                         &newer_stats,
                         ntokens - newer_token_set.n_ext_tokens - newer_token_set.n_long_tokens(),
                     );
-                    let newer_stats = tokenize_file(&newer_token_set, sampler, None);
+                    let newer_stats = tokenizer_cache.get_stats(&newer_token_set);
 
                     if newer_stats.total_tokens < stats.total_tokens {
                         println!();
                         println!("Removed {}", show_bytes(s));
-                        return Some(newer_stats);
+                        return Some(newer_stats.clone());
                     }
                 }
             }
@@ -151,19 +180,71 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     None
 }
 
+fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
+    token_set: &TokenSet,
+    ntokens: usize,
+    bytes_optimizer: &BO,
+    tokenizer_cache: &mut TokenizerCache<'a, S>,
+) -> Option<TokenStats> {
+    if token_set.ntokens() < ntokens {
+        return add_remove_token(token_set, ntokens, bytes_optimizer, tokenizer_cache);
+    }
+
+    assert_eq!(token_set.ntokens(), ntokens);
+
+    let stats = tokenizer_cache.get_stats(token_set);
+
+    if token_set.ntokens() - token_set.n_ext_tokens - token_set.n_long_tokens() > 0 {
+        let new_token_set = BO::optimize_bytes(
+            &stats,
+            token_set.ntokens() - token_set.n_ext_tokens - token_set.n_long_tokens() - 1,
+        );
+        assert!(new_token_set.ntokens() == ntokens - 1);
+        let (new_token_set, new_token) = add_token_bpe(&new_token_set, tokenizer_cache);
+        let new_stats = tokenizer_cache.get_stats(&new_token_set);
+        if new_stats.total_tokens < stats.total_tokens {
+            println!("Added {}", show_bytes(&new_token));
+            return Some(new_stats)
+        }
+    }
+
+    print!("Removing:");
+    for (token_idx, token) in token_set.tokens.iter().enumerate() {
+        if let Token::Str(s) = token {
+            if s.len() > 1 {
+                let mut new_token_set = token_set.clone();
+                print!(" {}", show_bytes(s));
+                new_token_set.remove_token(token_idx);
+                assert!(new_token_set.ntokens() == ntokens - 1);
+                let (new_token_set, new_token) = add_token_bpe(&new_token_set, tokenizer_cache);
+                assert!(new_token_set.ntokens() == ntokens);
+                let new_stats = tokenizer_cache.get_stats(&new_token_set);
+
+                if new_stats.total_tokens < stats.total_tokens {
+                    println!();
+                    println!("{} -> {}", show_bytes(s), show_bytes(&new_token));
+                    return Some(new_stats)
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     token_set: &TokenSet,
     ntokens: usize,
-    sampler: &'a S,
     bytes_optimizer: &BO,
+    tokenizer_cache: &mut TokenizerCache<'a, S>,
 ) -> Option<TokenSet> {
-    let stats = tokenize_file(&token_set, sampler, None);
+    let stats = tokenizer_cache.get_stats(token_set);
 
     let n_ext_tokens = token_set.n_ext_tokens;
     let n_long_tokens = token_set.n_long_tokens();
 
     let new_token_set = BO::optimize_bytes(&stats, ntokens - n_ext_tokens - n_long_tokens);
-    let new_stats = tokenize_file(&new_token_set, sampler, None);
+    let new_stats = tokenizer_cache.get_stats(&new_token_set);
     if new_stats.total_tokens < stats.total_tokens {
         println!(
             "Updated encoding of single bytes. New bytes/token: {}",
@@ -172,7 +253,13 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         return Some(new_stats.token_set);
     }
 
-    if let Some(new_stats) = add_remove_token(&stats, ntokens, sampler, bytes_optimizer) {
+    if let Some(new_stats) = remove_add_token(token_set, ntokens, bytes_optimizer, tokenizer_cache) {
+        assert!(new_stats.token_set.ntokens() <= ntokens);
+        return Some(new_stats.token_set);
+    }
+
+    if let Some(new_stats) = add_remove_token(token_set, ntokens, bytes_optimizer, tokenizer_cache) {
+        assert!(new_stats.token_set.ntokens() <= ntokens);
         return Some(new_stats.token_set);
     }
 
@@ -182,11 +269,10 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
 fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     mut token_set: TokenSet,
     ntokens: usize,
-    sampler: &'a S,
     bytes_optimizer: &BO,
-    initial_size: Option<u64>,
+    tokenizer_cache: &mut TokenizerCache<'a, S>,
 ) -> TokenStats {
-    let stats = tokenize_file(&token_set, sampler, initial_size);
+    let stats = tokenizer_cache.get_stats(&token_set);
     println!(
         "Initial tokens: {}, bytes/token = {}",
         token_set.ntokens(),
@@ -195,7 +281,7 @@ fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
 
     loop {
         if let Some(new_token_set) =
-            optimization_step(&token_set, ntokens, sampler, bytes_optimizer)
+            optimization_step(&token_set, ntokens, bytes_optimizer, tokenizer_cache)
         {
             token_set = new_token_set;
         } else {
@@ -204,7 +290,7 @@ fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     }
 
     token_set.sort();
-    tokenize_file(&token_set, sampler, initial_size)
+    tokenizer_cache.get_stats(&token_set).clone()
 }
 
 pub fn optimize_tokenset<'a, S: Sampler<'a>>(
@@ -215,18 +301,20 @@ pub fn optimize_tokenset<'a, S: Sampler<'a>>(
     initial_size: Option<u64>,
 ) -> TokenStats {
     let bytes_optimizer = SimpleBytesOptimizer {};
+    let mut tokenizer_cache = TokenizerCache::new(sampler, initial_size);
+
     match token_type {
         TokenType::Bits1 => {
             let token_set = TokenSet::new_bits1(processing, true);
-            optimize_tokenset_impl(token_set, ntokens, sampler, &bytes_optimizer, initial_size)
+            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
         }
         TokenType::Bits2 => {
             let token_set = TokenSet::new_bits2(processing, true);
-            optimize_tokenset_impl(token_set, ntokens, sampler, &bytes_optimizer, initial_size)
+            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
         }
         TokenType::Bits4 => {
             let token_set = TokenSet::new_bits4(processing, true);
-            optimize_tokenset_impl(token_set, ntokens, sampler, &bytes_optimizer, initial_size)
+            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
         }
         TokenType::Bytes => {
             let token_set = TokenSet::new_bits4(processing, true);
@@ -234,9 +322,8 @@ pub fn optimize_tokenset<'a, S: Sampler<'a>>(
             optimize_tokenset_impl(
                 token_set,
                 ntokens,
-                sampler,
                 &noop_bytes_optimizer,
-                initial_size,
+                &mut tokenizer_cache
             )
         }
         TokenType::BytesHuff => unimplemented!(),

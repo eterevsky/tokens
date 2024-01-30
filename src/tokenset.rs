@@ -301,13 +301,18 @@ impl TokenSet {
         }
 
         let last_idx = self.tokens.len() - 1;
-        let last_token = self.tokens.pop().unwrap();
-        self.tokens[token_idx] = last_token;
 
-        for seq in self.sequences.iter_mut() {
-            for tok in seq.tokens.iter_mut() {
-                if *tok == last_idx {
-                    *tok = token_idx
+        if token_idx == last_idx {
+            self.tokens.pop();
+        } else {
+            let last_token = self.tokens.pop().unwrap();
+            self.tokens[token_idx] = last_token;
+
+            for seq in self.sequences.iter_mut() {
+                for tok in seq.tokens.iter_mut() {
+                    if *tok == last_idx {
+                        *tok = token_idx
+                    }
                 }
             }
         }

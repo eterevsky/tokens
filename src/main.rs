@@ -17,7 +17,6 @@ mod tokenset;
 
 use self::input::file_sampler::FileSampler;
 use self::input::memory_sampler::MemorySampler;
-use self::input::preloaded_sampler::PreloadedSampler;
 use self::optimize::optimize_tokenset;
 use self::processing::{process_file, Processing};
 use self::tokenset::TokenType;
@@ -148,17 +147,31 @@ fn optimize(
     let (filename, _temp) = maybe_process_file(filename_raw, filename_processed, processing);
     let initial_size = std::fs::metadata(filename_raw).unwrap().len();
 
-    println!("Opening {}", &filename);
-    let sampler = FileSampler::new(&filename, 1 << 24, None);
 
-    println!("Optimizing a token set with {} tokens", ntokens);
-    let stats = optimize_tokenset(
-        ntokens,
-        &sampler,
-        processing,
-        token_type,
-        Some(initial_size),
-    );
+    println!("Opening {}", &filename);
+    let stats = if initial_size < 1 << 34 {
+        let sampler = MemorySampler::from_file(&filename, 1<<20);
+    
+        println!("Optimizing a token set with {} tokens", ntokens);
+        optimize_tokenset(
+            ntokens,
+            &sampler,
+            processing,
+            token_type,
+            Some(initial_size),
+        )
+    } else {
+        let sampler = FileSampler::new(&filename, 1 << 24, None);
+    
+        println!("Optimizing a token set with {} tokens", ntokens);
+        optimize_tokenset(
+            ntokens,
+            &sampler,
+            processing,
+            token_type,
+            Some(initial_size),
+        )
+       };
 
     let output_path = tokens_dir_path.join(format!("{}.json", stats.token_set.name()));
     println!("Writing the token set to {}.", output_path.display());

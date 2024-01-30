@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -101,4 +102,48 @@ pub fn tokenize_file<'a, S: Sampler<'a>>(
     });
 
     stats
+}
+
+pub struct TokenizerCache<'a, S: Sampler<'a>> {
+    sampler: &'a S,
+    cache: HashMap<String, TokenStats>,
+    initial_size: Option<u64>,
+}
+
+impl<'a, S: Sampler<'a>> TokenizerCache<'a, S> {
+    pub fn new(sampler: &'a S, initial_size: Option<u64>) -> Self {
+        Self {
+            cache: HashMap::new(),
+            sampler,
+            initial_size,
+        }
+    }
+
+    pub fn get_stats_with_pairs(&mut self, token_set: &TokenSet) -> TokenStats {
+        let stats = tokenize_file(token_set, self.sampler, self.initial_size);
+        let key = self.get_key(token_set);
+
+        self.cache.insert(key, stats.clone_without_pairs());
+
+        stats
+    }
+
+    pub fn get_stats(&mut self, token_set: &TokenSet) -> TokenStats {
+        let key = self.get_key(token_set);
+
+        if let Some(stats) = self.cache.get(&key) {
+            return stats.clone()
+        }
+
+        let mut stats = tokenize_file(token_set, self.sampler, self.initial_size);
+        stats.pair_counts.clear();
+        stats.pair_counts.shrink_to_fit();
+        self.cache.insert(key.clone(), stats.clone());
+        stats
+    }
+
+    fn get_key(&self, token_set: &TokenSet) -> String {
+        let value = token_set.to_json();
+        serde_json::to_string(&value).unwrap()
+    }
 }
