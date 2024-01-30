@@ -10,91 +10,17 @@ use tempfile::NamedTempFile;
 mod batch_tokenize;
 mod input;
 mod optimize;
-mod optimizer;
 mod processing;
-mod stats;
 mod stats2;
-mod tokenizer;
 mod tokenizer2;
-mod tokens;
 mod tokenset;
 
 use self::input::file_sampler::FileSampler;
 use self::input::memory_sampler::MemorySampler;
 use self::input::preloaded_sampler::PreloadedSampler;
 use self::optimize::optimize_tokenset;
-use self::optimizer::optimize_bpe;
 use self::processing::{process_file, Processing};
-use self::tokenizer::tokenize_file;
-use self::tokens::{LiteralEncoding, TokenSet};
 use self::tokenset::TokenType;
-
-fn optimize_tokens(
-    data_filename: &str,
-    input_tokens: &Option<String>,
-    output_tokens: &Option<String>,
-    ntokens: usize,
-    initial_size: Option<u64>,
-    processing: &Option<String>,
-    in_memory: bool,
-    nchunks: Option<usize>,
-    chunk_size: usize,
-    add_block: usize,
-    literal_encoding: LiteralEncoding,
-) {
-    println!(
-        "Using {} threads",
-        std::thread::available_parallelism().unwrap().get()
-    );
-
-    let token_set = if let Some(tokens_file) = input_tokens {
-        TokenSet::from_json(tokens_file.as_str())
-    } else {
-        TokenSet::new(literal_encoding)
-    };
-
-    let file_size = std::fs::metadata(data_filename).unwrap().len();
-    let initial_size = initial_size.unwrap_or(file_size);
-
-    let fast_sampler = PreloadedSampler::new(data_filename, 16384, 1024);
-
-    let (token_set, token_stats) = if nchunks.is_some() {
-        let nchunks = nchunks.unwrap();
-        let sampler = PreloadedSampler::new(data_filename, chunk_size, nchunks);
-        let (token_set, _) = optimize_bpe(&token_set, ntokens, &sampler, &fast_sampler, add_block);
-
-        let full_sampler = FileSampler::new(data_filename, chunk_size, None);
-        let stats = tokenize_file(&token_set, &full_sampler, false);
-
-        (token_set, stats)
-    } else if in_memory {
-        let sampler = MemorySampler::from_file(data_filename, chunk_size);
-        optimize_bpe(&token_set, ntokens, &sampler, &fast_sampler, add_block)
-    } else {
-        let sampler = FileSampler::new(data_filename, chunk_size, None);
-        optimize_bpe(&token_set, ntokens, &sampler, &fast_sampler, add_block)
-    };
-
-    let mut tokens_json = token_set.to_json(&token_stats, initial_size);
-
-    let mut processing_json: Vec<json::JsonValue> = Vec::new();
-    if let Some(processing) = processing {
-        for stage in processing.split(",") {
-            if !stage.is_empty() {
-                processing_json.push(stage.into());
-            }
-        }
-    }
-
-    tokens_json["processing"] = processing_json.into();
-
-    let tokens_json_str = json::stringify_pretty(tokens_json, 2);
-    println!("{}", &tokens_json_str);
-
-    if let Some(out) = output_tokens {
-        std::fs::write(&out, &tokens_json_str).unwrap();
-    }
-}
 
 fn maybe_process_file(
     filename_raw: &str,
@@ -114,93 +40,6 @@ fn maybe_process_file(
             (filename, Some(temp_processed))
         }
     }
-}
-
-fn optimize_all_for_proc(
-    filename_raw: &str,
-    filename_processed: Option<&str>,
-    processing: Processing,
-    tokens_dir: &str,
-    min_tokens: usize,
-    max_tokens: usize,
-) {
-    let initial_size = std::fs::metadata(filename_raw).unwrap().len();
-    println!("Optimizing for proc '{}'", processing);
-
-    let (filename, _temp) = maybe_process_file(filename_raw, filename_processed, processing);
-
-    if initial_size < 1 << 24 {
-        let fast_sampler = MemorySampler::from_file(&filename, 16384);
-        let sampler = MemorySampler::from_file(&filename, 1 << 20);
-        let slow_sampler = MemorySampler::from_file(&filename, 1 << 24);
-
-        optimizer::optimize_all(
-            initial_size,
-            &slow_sampler,
-            &sampler,
-            &fast_sampler,
-            tokens_dir,
-            min_tokens,
-            max_tokens,
-            &processing.to_string(),
-        );
-    } else if initial_size < 1 << 32 {
-        let fast_sampler = PreloadedSampler::new(&filename, 16384, 1024);
-        let sampler = MemorySampler::from_file(&filename, 1 << 24);
-        let slow_sampler = FileSampler::new(&filename, 1 << 24, None);
-
-        optimizer::optimize_all(
-            initial_size,
-            &slow_sampler,
-            &sampler,
-            &fast_sampler,
-            tokens_dir,
-            min_tokens,
-            max_tokens,
-            &processing.to_string(),
-        );
-    } else {
-        let fast_sampler = FileSampler::new(&filename, 131072, Some(1024));
-        // let sampler = FileSampler::new(&filename, 1 << 20, Some(4096));
-        let sampler = PreloadedSampler::new(&filename, 1 << 20, 1 << 14);
-        let slow_sampler = FileSampler::new(&filename, 1 << 24, None);
-
-        optimizer::optimize_all(
-            initial_size,
-            &slow_sampler,
-            &sampler,
-            &fast_sampler,
-            tokens_dir,
-            min_tokens,
-            max_tokens,
-            &processing.to_string(),
-        );
-    }
-}
-
-fn optimize_all(
-    filename: &str,
-    filename_caps_words: Option<&str>,
-    tokens_dir: &str,
-    min_tokens: usize,
-    max_tokens: usize,
-) {
-    optimize_all_for_proc(
-        filename,
-        Some(filename),
-        Processing::Raw,
-        tokens_dir,
-        min_tokens,
-        std::cmp::min(max_tokens, 256),
-    );
-    optimize_all_for_proc(
-        filename,
-        filename_caps_words,
-        Processing::CapsWords,
-        tokens_dir,
-        min_tokens,
-        max_tokens,
-    );
 }
 
 fn process(filename: &str, output: &str) {
@@ -333,74 +172,8 @@ struct Args {
     command: Command,
 }
 
-const DEFAULT_PROCESSING: &str = "raw";
-
 #[derive(Subcommand, Debug)]
 enum Command {
-    OptimizeTokens {
-        #[arg(short, long)]
-        data: String,
-
-        #[arg(short, long)]
-        input_tokens: Option<String>,
-
-        #[arg(short, long)]
-        output_tokens: Option<String>,
-
-        #[arg(short, long)]
-        ntokens: usize,
-
-        #[arg(long, default_value_t=LiteralEncoding::Dist8)]
-        literals: LiteralEncoding,
-
-        /// If the input is pre-processed, this argument specifies the size
-        /// of the input before pre-processing.
-        #[arg(long)]
-        initial_size: Option<u64>,
-
-        /// A comma-separated list of the processing stages applied to the input
-        /// for the purposes of including it into the output.
-        #[arg(long)]
-        processing: Option<String>,
-
-        #[arg(long, default_value_t=16 * 1024 * 1024)]
-        chunk_size: usize,
-
-        /// Sample this number of training data chunks, keep them in memory
-        /// and train the token set on them. Final stats will be calculated
-        /// the whole dataset.
-        #[arg(long)]
-        nchunks: Option<usize>,
-
-        /// Use in-memory sampler in case all training data fits in memory.
-        /// Ignored when nchunks is specified.
-        #[arg(long)]
-        in_memory: bool,
-
-        /// How many tokens will be added after each pass.
-        #[arg(long, default_value_t = 1)]
-        add_block: usize,
-    },
-
-    OptimizeAll {
-        #[arg(short, long)]
-        data: String,
-
-        // #[arg(long)]
-        // data_caps: Option<String>,
-        #[arg(long)]
-        data_caps_words: Option<String>,
-
-        #[arg(short, long)]
-        tokens_dir: String,
-
-        #[arg(long, default_value_t = 2)]
-        min_tokens: usize,
-
-        #[arg(long, default_value_t = 16384)]
-        max_tokens: usize,
-    },
-
     Process {
         #[arg(short, long)]
         data: String,
@@ -474,47 +247,6 @@ fn main() {
             tokens_dir,
             *processing,
             *token_type,
-        ),
-
-        Command::OptimizeTokens {
-            data,
-            input_tokens,
-            output_tokens,
-            ntokens,
-            literals,
-            initial_size,
-            processing,
-            in_memory,
-            nchunks,
-            chunk_size,
-            add_block,
-        } => optimize_tokens(
-            data.as_str(),
-            input_tokens,
-            output_tokens,
-            *ntokens,
-            *initial_size,
-            processing,
-            *in_memory,
-            *nchunks,
-            *chunk_size,
-            *add_block,
-            *literals,
-        ),
-
-        Command::OptimizeAll {
-            data,
-            // data_caps,
-            data_caps_words,
-            tokens_dir,
-            min_tokens,
-            max_tokens,
-        } => optimize_all(
-            data.as_str(),
-            data_caps_words.as_deref(),
-            &tokens_dir.as_str(),
-            *min_tokens,
-            *max_tokens,
         ),
 
         Command::Process { data, output } => process(data.as_str(), output.as_str()),
