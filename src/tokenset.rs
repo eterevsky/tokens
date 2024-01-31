@@ -62,6 +62,18 @@ pub fn show_bytes(bytes: &[u8]) -> String {
     }
 }
 
+fn parse_token(value: &Value) -> Token {
+    match value {
+        Value::Array(v) => Token::Str(v
+            .iter()
+            .map(|b| b.as_i64().unwrap() as u8)
+            .collect::<Vec<_>>()),
+        Value::String(s) => Token::Str(s.as_bytes().to_vec()),
+        Value::Number(x) => Token::Ext(x.as_u64().unwrap() as u8),
+        _ => panic!("Unexpected token"),
+    }
+}
+
 impl Token {
     fn to_json(&self) -> Value {
         match self {
@@ -264,17 +276,23 @@ impl TokenSet {
             other => TokenSet::new(n_ext_tokens, processing, other, split_paragraphs),
         };
         for token in value["tokens"].as_array().unwrap().iter() {
-            let token = match &token {
-                &Value::Array(v) => v
-                    .iter()
-                    .map(|b| b.as_i64().unwrap() as u8)
-                    .collect::<Vec<_>>(),
-                &Value::String(s) => s.as_bytes().to_vec(),
-                &Value::Number(_) => continue,
-                _ => panic!("Unexpected token"),
-            };
+            if let Token::Str(token) = parse_token(token) {
+                token_set.add_token(&token);
+            }
+        }
 
-            token_set.add_token(&token);
+        if value.as_object().unwrap().contains_key("sequences") {
+            for seq in value["sequences"].as_array().unwrap().iter() {
+                let string = if let Token::Str(s) = parse_token(&seq["string"]) { s } else {panic!()};
+                let mut tokens = Vec::new();
+                for token in seq["tokens"].as_array().unwrap().iter() {
+                    let token = parse_token(token);
+                    let idx = token_set.tokens.iter().position(|x| x == &token).unwrap();
+                    tokens.push(idx);
+                }
+
+                token_set.add_sequence(string, tokens);
+            }
         }
 
         token_set

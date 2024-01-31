@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use tempfile::NamedTempFile;
 
 mod batch_tokenize;
@@ -20,7 +21,7 @@ use self::input::file_sampler::FileSampler;
 use self::input::memory_sampler::MemorySampler;
 use self::optimize::optimize_tokenset;
 use self::processing::{process_file, Processing};
-use self::tokenset::TokenType;
+use self::tokenset::{TokenType, TokenSet};
 
 fn maybe_process_file(
     filename_raw: &str,
@@ -100,20 +101,24 @@ fn count_chars(filename: &str) {
     println!("Max char: {:?}", std::char::from_u32(max_c).unwrap());
 }
 
+fn read_token_set(filename: &str) -> TokenSet {
+    let path = Path::new(filename);
+    let input_tokens_file = File::open(path).expect("Input tokens file not found");
+    let reader = BufReader::new(input_tokens_file);
+
+    // Deserialize the JSON data into a serde_json::Value
+    let tokenset_json: Value = serde_json::from_reader(reader).unwrap();
+    TokenSet::from_json(tokenset_json)
+}
+
 fn load_save_tokens(
     filename_raw: &str,
     filename_processed: Option<&str>,
     input_tokens_path: &str,
     tokens_dir: &str,
 ) {
-    let tokens_dir_path = std::path::Path::new(tokens_dir);
-    println!("Reading the token set from {}.", input_tokens_path);
-    let input_tokens_file = File::open(input_tokens_path).expect("Input tokens file not found");
-    let reader = BufReader::new(input_tokens_file);
-
-    // Deserialize the JSON data into a serde_json::Value
-    let tokenset_json: Value = serde_json::from_reader(reader).unwrap();
-    let token_set = tokenset::TokenSet::from_json(tokenset_json);
+    let tokens_dir_path = Path::new(tokens_dir);
+    let token_set = read_token_set(input_tokens_path);
 
     let (filename, _temp) =
         maybe_process_file(filename_raw, filename_processed, token_set.processing);
@@ -142,12 +147,19 @@ fn optimize(
     tokens_dir: &str,
     processing: Processing,
     token_type: TokenType,
+    input_tokens: Option<&str>,
 ) {
-    let tokens_dir_path = std::path::Path::new(tokens_dir);
+    let tokens_dir_path = Path::new(tokens_dir);
 
     let (filename, _temp) = maybe_process_file(filename_raw, filename_processed, processing);
     let initial_size = std::fs::metadata(filename_raw).unwrap().len();
 
+    let input_token_set = if let Some(filename) = input_tokens {
+        println!("Reading the input token set from {}.", filename);
+        Some(read_token_set(filename))
+    } else {
+        None
+    };
 
     println!("Opening {}", &filename);
     let stats = if initial_size < 1 << 34 {
@@ -160,7 +172,7 @@ fn optimize(
             processing,
             token_type,
             Some(initial_size),
-            None,
+            input_token_set,
             &tokens_dir_path,
         )
     } else {
@@ -173,7 +185,7 @@ fn optimize(
             processing,
             token_type,
             Some(initial_size),
-            None,
+            input_token_set,
             &tokens_dir_path,
         )
        };
@@ -237,6 +249,9 @@ enum Command {
 
         #[arg(short, long)]
         ntokens: usize,
+
+        #[arg(short, long)]
+        input_tokens: Option<String>,
     },
 }
 
@@ -258,6 +273,7 @@ fn main() {
             processing,
             token_type,
             ntokens,
+            input_tokens,
         } => optimize(
             *ntokens,
             data,
@@ -265,6 +281,7 @@ fn main() {
             tokens_dir,
             *processing,
             *token_type,
+            input_tokens.as_deref(),
         ),
 
         Command::Process { data, output } => process(data.as_str(), output.as_str()),
