@@ -202,6 +202,15 @@ impl TokenSet {
         token_set
     }
 
+    pub fn new_bytes(processing: Processing) -> Self {
+        let mut token_set = Self::new(0, processing, TokenType::Bytes, true);
+        for c in 0..256 {
+            token_set.add_token(&[c as u8]);
+        }
+
+        token_set
+    }
+
     pub fn from_json(value: Value) -> Self {
         let n_ext_tokens = value["tokens"]
             .as_array()
@@ -297,11 +306,13 @@ impl TokenSet {
         self.sequences.push(sequence);
     }
 
-    pub fn add_token(&mut self, token: &[u8]) {
+    pub fn add_token(&mut self, token: &[u8]) -> usize {
         assert!(!token.is_empty());
         self.sequences.retain(|s| s.string != token);
         let token = Token::Str(token.to_vec());
+        let idx = self.tokens.len();
         self.tokens.push(token);
+        idx
     }
 
     pub fn remove_token(&mut self, token_idx: usize) {
