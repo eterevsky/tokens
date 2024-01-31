@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 
 use crate::batch_tokenize::TokenizerCache;
 use crate::input::sample::Sampler;
@@ -57,7 +58,7 @@ fn add_token_bpe<'a, S: Sampler<'a>>(
         dbg!(stats.token_counts);
         dbg!(stats.pair_counts);
 
-        return None
+        return None;
     }
 
     let mut new_token_set = token_set.clone();
@@ -73,7 +74,9 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     tokenizer_cache: &mut TokenizerCache<'a, S>,
 ) -> Option<TokenStats> {
     let add_bpe_res = add_token_bpe(token_set, tokenizer_cache);
-    if add_bpe_res.is_none() { return None; }
+    if add_bpe_res.is_none() {
+        return None;
+    }
     let (new_token_set, new_token) = add_bpe_res.unwrap();
     println!("Trying to add token {}", show_bytes(&new_token));
     let stats = tokenizer_cache.get_stats(token_set);
@@ -180,12 +183,12 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         if let Some((new_token_set, new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
             assert!(new_token_set.ntokens() == ntokens);
             let new_stats = tokenizer_cache.get_stats(&new_token_set);
-    
+
             if new_stats.total_tokens < stats.total_tokens {
                 println!();
                 println!("{} -> {}", show_bytes(s.as_slice()), show_bytes(&new_token));
                 return Some(new_stats);
-            }    
+            }
         }
     }
     println!();
@@ -232,11 +235,19 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     None
 }
 
+fn save_tokens(token_set: &TokenSet, tokens_dir: &Path) {
+    let output_path = tokens_dir.join(format!("{}.json", token_set.name()));
+    println!("Writing the token set to {}.", output_path.display());
+    let serialized = serde_json::to_string(&token_set.to_json()).unwrap();
+    std::fs::write(&output_path, serialized).unwrap();
+}
+
 fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     mut token_set: TokenSet,
     ntokens: usize,
     bytes_optimizer: &BO,
     tokenizer_cache: &mut TokenizerCache<'a, S>,
+    tokens_dir: &Path,
 ) -> TokenStats {
     let stats = tokenizer_cache.get_stats(&token_set);
     println!(
@@ -256,6 +267,7 @@ fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
             &mut removal_count,
         ) {
             token_set = new_token_set;
+            save_tokens(&token_set, tokens_dir);
         } else {
             break;
         }
@@ -271,41 +283,54 @@ pub fn optimize_tokenset<'a, S: Sampler<'a>>(
     processing: Processing,
     token_type: TokenType,
     initial_size: Option<u64>,
+    pretrained_token_set: Option<TokenSet>,
+    tokens_dir: &Path,
 ) -> TokenStats {
-    let bytes_optimizer = SimpleBytesOptimizer {};
     let mut tokenizer_cache = TokenizerCache::new(sampler, initial_size);
 
+    let token_set = match (pretrained_token_set, token_type) {
+        (Some(ts), _) => ts,
+        (None, TokenType::Bits1) => TokenSet::new_bits1(processing, true),
+        (None, TokenType::Bits2) => TokenSet::new_bits2(processing, true),
+        (None, TokenType::Bits4) => TokenSet::new_bits4(processing, true),
+        (None, TokenType::Bytes) => TokenSet::new_bytes(processing),
+        (None, TokenType::BytesHuff) => {
+            let token_set = TokenSet::new_bytes(processing);
+            let stats = tokenizer_cache.get_stats(&token_set);
+            HuffOptimizer::optimize_bytes(&stats, ntokens)
+        }
+    };
+
     match token_type {
-        TokenType::Bits1 => {
-            let token_set = TokenSet::new_bits1(processing, true);
-            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
-        }
-        TokenType::Bits2 => {
-            let token_set = TokenSet::new_bits2(processing, true);
-            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
-        }
-        TokenType::Bits4 => {
-            let token_set = TokenSet::new_bits4(processing, true);
-            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
+        TokenType::Bits1 | TokenType::Bits2 | TokenType::Bits4 => {
+            let bytes_optimizer = SimpleBytesOptimizer {};
+            optimize_tokenset_impl(
+                token_set,
+                ntokens,
+                &bytes_optimizer,
+                &mut tokenizer_cache,
+                tokens_dir,
+            )
         }
         TokenType::Bytes => {
-            let token_set = TokenSet::new_bits4(processing, true);
             let noop_bytes_optimizer = NoopBytesOptimizer {};
             optimize_tokenset_impl(
                 token_set,
                 ntokens,
                 &noop_bytes_optimizer,
                 &mut tokenizer_cache,
+                tokens_dir,
             )
         }
         TokenType::BytesHuff => {
-            let token_set = TokenSet::new_bytes(processing);
-            let stats = tokenizer_cache.get_stats(&token_set);
-            let token_set = HuffOptimizer::optimize_bytes(&stats, ntokens);
-            // token_set.sort();
-            // tokenizer_cache.get_stats(&token_set)
             let bytes_optimizer = HuffOptimizer {};
-            optimize_tokenset_impl(token_set, ntokens, &bytes_optimizer, &mut tokenizer_cache)
+            optimize_tokenset_impl(
+                token_set,
+                ntokens,
+                &bytes_optimizer,
+                &mut tokenizer_cache,
+                tokens_dir,
+            )
         }
     }
 }

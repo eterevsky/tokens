@@ -160,6 +160,8 @@ fn optimize(
             processing,
             token_type,
             Some(initial_size),
+            None,
+            &tokens_dir_path,
         )
     } else {
         let sampler = FileSampler::new(&filename, 1 << 24, None);
@@ -171,6 +173,8 @@ fn optimize(
             processing,
             token_type,
             Some(initial_size),
+            None,
+            &tokens_dir_path,
         )
        };
 
