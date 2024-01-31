@@ -20,8 +20,6 @@ pub enum TokenType {
     /// Missing bytes are represented as sequences of ext tokens, based on
     /// their frequency. (≥3 tokens)
     BytesHuff,
-    /// All Unicode characters are represented as sequences.  (≥3 tokens)
-    CharsHuff,
 }
 
 impl fmt::Display for TokenType {
@@ -35,7 +33,6 @@ impl fmt::Display for TokenType {
                 TokenType::Bits4 => "bits4",
                 TokenType::Bytes => "bytes",
                 TokenType::BytesHuff => "byteshuff",
-                TokenType::CharsHuff => "charshuff",
             }
         )
     }
@@ -230,7 +227,6 @@ impl TokenSet {
             Some("bits4") => TokenType::Bits4,
             Some("bytes") => TokenType::Bytes,
             Some("byteshuff") => TokenType::BytesHuff,
-            Some("charshuff") => TokenType::CharsHuff,
             _ => panic!("Unknown token type"),
         };
         let split_paragraphs = match value.get("split_paragraph") {
@@ -282,6 +278,18 @@ impl TokenSet {
             self.processing,
             self.token_type
         )
+    }
+
+    /// Returns the minimum number of Ext and single-byte tokens that a 
+    /// tokenset of this type can have.
+    pub fn min_bytes_ext_tokens(&self) -> usize {
+        match self.token_type {
+            TokenType::Bits1 => 2,
+            TokenType::Bits2 => 4,
+            TokenType::Bits4 => 16,
+            TokenType::Bytes => 256,
+            TokenType::BytesHuff => 3,
+        }
     }
 
     pub fn add_sequence(&mut self, string: Vec<u8>, tokens: Vec<usize>) {

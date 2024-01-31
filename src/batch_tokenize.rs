@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::input::sample::{Sample, Sampler};
 use super::stats2::TokenStats;
 use super::tokenizer2::FragmentTokenizer;
-use super::tokenset::TokenSet;
+use super::tokenset::{Token, TokenSet, show_bytes};
 
 pub fn tokenize_file_sync<'a, S: Sampler<'a>>(
     token_set: &TokenSet,
@@ -121,7 +121,7 @@ impl<'a, S: Sampler<'a>> TokenizerCache<'a, S> {
 
     pub fn get_stats_with_pairs(&mut self, token_set: &TokenSet) -> TokenStats {
         let stats = tokenize_file(token_set, self.sampler, self.initial_size);
-        let key = self.get_key(token_set);
+        let key = Self::get_key(token_set);
 
         self.cache.insert(key, stats.clone_without_pairs());
 
@@ -129,10 +129,10 @@ impl<'a, S: Sampler<'a>> TokenizerCache<'a, S> {
     }
 
     pub fn get_stats(&mut self, token_set: &TokenSet) -> TokenStats {
-        let key = self.get_key(token_set);
+        let key = Self::get_key(token_set);
 
         if let Some(stats) = self.cache.get(&key) {
-            return stats.clone()
+            return stats.clone();
         }
 
         let mut stats = tokenize_file(token_set, self.sampler, self.initial_size);
@@ -142,8 +142,11 @@ impl<'a, S: Sampler<'a>> TokenizerCache<'a, S> {
         stats
     }
 
-    fn get_key(&self, token_set: &TokenSet) -> String {
-        let value = token_set.to_json();
+    fn get_key(token_set: &TokenSet) -> String {
+        let mut copy = token_set.clone();
+        copy.sort();
+
+        let value = copy.to_json();
         serde_json::to_string(&value).unwrap()
     }
 }

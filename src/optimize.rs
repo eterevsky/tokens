@@ -71,6 +71,7 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     tokenizer_cache: &mut TokenizerCache<'a, S>,
 ) -> Option<TokenStats> {
     let (new_token_set, new_token) = add_token_bpe(token_set, tokenizer_cache);
+    println!("Trying to add token {}", show_bytes(&new_token));
     let stats = tokenizer_cache.get_stats(token_set);
 
     if new_token_set.ntokens() <= ntokens {
@@ -82,11 +83,10 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     } else {
         assert_eq!(new_token_set.ntokens(), ntokens + 1);
 
-        if new_token_set.n_ext_tokens + new_token_set.n_long_tokens() < ntokens {
+        if ntokens - new_token_set.n_long_tokens() >= new_token_set.min_bytes_ext_tokens() {
             let new_stats = tokenizer_cache.get_stats(&new_token_set);
             let token_set_new_bytes = BO::optimize_bytes(
-                &new_stats,
-                ntokens - new_token_set.n_ext_tokens - new_token_set.n_long_tokens(),
+                &new_stats, ntokens - new_token_set.n_long_tokens(),
             );
             let new_stats = tokenizer_cache.get_stats(&token_set_new_bytes);
             if new_stats.total_tokens < stats.total_tokens {
@@ -98,7 +98,6 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
             }
         }
 
-        println!("Trying to add token {}", show_bytes(&new_token));
         print!("Trying to remove tokens:");
         for (token_idx, token) in new_token_set.tokens.iter().enumerate() {
             if let Token::Str(s) = token {
@@ -111,7 +110,7 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
                     let newer_stats = tokenizer_cache.get_stats(&newer_token_set);
                     let newer_token_set = BO::optimize_bytes(
                         &newer_stats,
-                        ntokens - newer_token_set.n_ext_tokens - newer_token_set.n_long_tokens(),
+                        ntokens - newer_token_set.n_long_tokens(),
                     );
                     let newer_stats = tokenizer_cache.get_stats(&newer_token_set);
 
@@ -144,10 +143,10 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
 
     let stats = tokenizer_cache.get_stats(token_set);
 
-    if token_set.ntokens() - token_set.n_ext_tokens - token_set.n_long_tokens() > 0 {
+    if token_set.ntokens() - token_set.n_long_tokens() > token_set.min_bytes_ext_tokens() {
         let new_token_set = BO::optimize_bytes(
             &stats,
-            token_set.ntokens() - token_set.n_ext_tokens - token_set.n_long_tokens() - 1,
+            token_set.ntokens() - token_set.n_long_tokens() - 1,
         );
         assert!(new_token_set.ntokens() == ntokens - 1);
         let (new_token_set, new_token) = add_token_bpe(&new_token_set, tokenizer_cache);
@@ -201,10 +200,7 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
 ) -> Option<TokenSet> {
     let stats = tokenizer_cache.get_stats(token_set);
 
-    let n_ext_tokens = token_set.n_ext_tokens;
-    let n_long_tokens = token_set.n_long_tokens();
-
-    let new_token_set = BO::optimize_bytes(&stats, ntokens - n_ext_tokens - n_long_tokens);
+    let new_token_set = BO::optimize_bytes(&stats, ntokens - token_set.n_long_tokens());
     let new_stats = tokenizer_cache.get_stats(&new_token_set);
     if new_stats.total_tokens < stats.total_tokens {
         println!(
@@ -301,6 +297,5 @@ pub fn optimize_tokenset<'a, S: Sampler<'a>>(
             )
         }
         TokenType::BytesHuff => unimplemented!(),
-        TokenType::CharsHuff => unimplemented!(),
     }
 }
