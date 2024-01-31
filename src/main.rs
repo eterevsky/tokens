@@ -10,6 +10,7 @@ use tempfile::NamedTempFile;
 mod batch_tokenize;
 mod input;
 mod optimize;
+mod optimize_bytes;
 mod processing;
 mod stats2;
 mod tokenizer2;

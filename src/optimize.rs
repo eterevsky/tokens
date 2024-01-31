@@ -3,76 +3,10 @@ use std::io::Write;
 
 use crate::batch_tokenize::TokenizerCache;
 use crate::input::sample::Sampler;
+use crate::optimize_bytes::{BytesOptimizer, SimpleBytesOptimizer, NoopBytesOptimizer};
 use crate::processing::Processing;
 use crate::stats2::TokenStats;
 use crate::tokenset::{show_bytes, Token, TokenSet, TokenType};
-
-trait BytesOptimizer {
-    fn optimize_bytes(token_stats: &TokenStats, n_byte_tokens: usize) -> TokenSet;
-}
-
-struct SimpleBytesOptimizer {}
-
-impl BytesOptimizer for SimpleBytesOptimizer {
-    fn optimize_bytes(stats: &TokenStats, n_byte_tokens: usize) -> TokenSet {
-        let mut byte_counts: [i64; 256] = [0; 256];
-        let mut single_byte_tokens = Vec::new();
-
-        for (token_id, token) in stats.token_set.tokens.iter().enumerate() {
-            if let Token::Str(s) = token {
-                if s.len() == 1 {
-                    byte_counts[s[0] as usize] = stats.token_counts[token_id] as i64;
-                    single_byte_tokens.push(s.clone());
-                }
-            }
-        }
-
-        for (seq_id, seq) in stats.token_set.sequences.iter().enumerate() {
-            if seq.string.len() == 1 {
-                byte_counts[seq.string[0] as usize] = stats.seq_counts[seq_id] as i64;
-            }
-        }
-
-        let mut bytes = (0..=255).collect::<Vec<u8>>();
-        bytes.sort_by_key(|&i| -byte_counts[i as usize]);
-        let selected_bytes = &bytes[..n_byte_tokens];
-
-        let mut new_token_set = match stats.token_set.token_type {
-            TokenType::Bits1 => {
-                TokenSet::new_bits1(stats.token_set.processing, stats.token_set.split_paragraphs)
-            }
-            TokenType::Bits2 => {
-                TokenSet::new_bits2(stats.token_set.processing, stats.token_set.split_paragraphs)
-            }
-            TokenType::Bits4 => {
-                TokenSet::new_bits4(stats.token_set.processing, stats.token_set.split_paragraphs)
-            }
-            _ => panic!("BytesOptimizer only works for Bits* TokenSet's"),
-        };
-
-        for &byte in selected_bytes.iter() {
-            new_token_set.add_token(&[byte]);
-        }
-
-        for token in stats.token_set.tokens.iter() {
-            if let Token::Str(s) = token {
-                if s.len() > 1 {
-                    new_token_set.add_token(s);
-                }
-            }
-        }
-
-        new_token_set
-    }
-}
-
-struct NoopBytesOptimizer {}
-
-impl BytesOptimizer for NoopBytesOptimizer {
-    fn optimize_bytes(token_stats: &TokenStats, _n_byte_tokens: usize) -> TokenSet {
-        token_stats.token_set.clone()
-    }
-}
 
 fn is_valid_token(s: &[u8]) -> bool {
     let n = "\n".as_bytes()[0];
