@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::io::Write;
+
 use crate::batch_tokenize::TokenizerCache;
 use crate::input::sample::Sampler;
 use crate::processing::Processing;
@@ -82,7 +85,10 @@ fn is_valid_token(s: &[u8]) -> bool {
     true
 }
 
-fn add_token_bpe<'a, S: Sampler<'a>>(token_set: &TokenSet, tokenizer_cache: &mut TokenizerCache<'a, S>) -> (TokenSet, Vec<u8>) {
+fn add_token_bpe<'a, S: Sampler<'a>>(
+    token_set: &TokenSet,
+    tokenizer_cache: &mut TokenizerCache<'a, S>,
+) -> (TokenSet, Vec<u8>) {
     let stats = tokenizer_cache.get_stats_with_pairs(token_set);
     let mut pairs = (0..stats.pair_counts.len())
         .filter(|&i| stats.pair_counts[i] > 0)
@@ -94,7 +100,7 @@ fn add_token_bpe<'a, S: Sampler<'a>>(token_set: &TokenSet, tokenizer_cache: &mut
     for pair_idx in pairs.iter() {
         let itoken1 = pair_idx / stats.ntokens();
         let itoken2 = pair_idx % stats.ntokens();
-    
+
         new_token = match (
             &stats.token_set.tokens[itoken1],
             &stats.token_set.tokens[itoken2],
@@ -104,10 +110,18 @@ fn add_token_bpe<'a, S: Sampler<'a>>(token_set: &TokenSet, tokenizer_cache: &mut
             }
             _ => unreachable!(),
         };
-    
+
         if is_valid_token(&new_token) {
             break;
-        }            
+        }
+    }
+
+    if new_token.is_empty() {
+        dbg!(&token_set.tokens);
+        dbg!(stats.token_counts);
+        dbg!(stats.pair_counts);
+
+        panic!();
     }
 
     let mut new_token_set = token_set.clone();
@@ -156,6 +170,7 @@ fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
             if let Token::Str(s) = token {
                 if s.len() > 1 && s != &new_token {
                     print!(" {}", show_bytes(&s));
+                    std::io::stdout().flush().unwrap();
                     let mut newer_token_set = new_token_set.clone();
                     newer_token_set.remove_token(token_idx);
 
@@ -185,6 +200,7 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     ntokens: usize,
     bytes_optimizer: &BO,
     tokenizer_cache: &mut TokenizerCache<'a, S>,
+    removal_count: &mut HashMap<Vec<u8>, usize>,
 ) -> Option<TokenStats> {
     if token_set.ntokens() < ntokens {
         return add_remove_token(token_set, ntokens, bytes_optimizer, tokenizer_cache);
@@ -204,30 +220,40 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         let new_stats = tokenizer_cache.get_stats(&new_token_set);
         if new_stats.total_tokens < stats.total_tokens {
             println!("Added {}", show_bytes(&new_token));
-            return Some(new_stats)
+            return Some(new_stats);
         }
     }
 
-    print!("Removing:");
-    for (token_idx, token) in token_set.tokens.iter().enumerate() {
+    let mut to_remove = vec![];
+    for token in token_set.tokens.iter() {
         if let Token::Str(s) = token {
             if s.len() > 1 {
-                let mut new_token_set = token_set.clone();
-                print!(" {}", show_bytes(s));
-                new_token_set.remove_token(token_idx);
-                assert!(new_token_set.ntokens() == ntokens - 1);
-                let (new_token_set, new_token) = add_token_bpe(&new_token_set, tokenizer_cache);
-                assert!(new_token_set.ntokens() == ntokens);
-                let new_stats = tokenizer_cache.get_stats(&new_token_set);
-
-                if new_stats.total_tokens < stats.total_tokens {
-                    println!();
-                    println!("{} -> {}", show_bytes(s), show_bytes(&new_token));
-                    return Some(new_stats)
-                }
+                to_remove.push(s.clone())
             }
         }
     }
+    to_remove.sort_unstable_by_key(|s| removal_count.get(s).unwrap_or(&0));
+
+    print!("Removing:");
+    for s in to_remove {
+        *removal_count.entry(s.clone()).or_insert(0) += 1;
+        let mut new_token_set = token_set.clone();
+        print!(" {}", show_bytes(s.as_slice()));
+        std::io::stdout().flush().unwrap();
+        let token_idx = new_token_set.find_token(&s).unwrap();
+        new_token_set.remove_token(token_idx);
+        assert!(new_token_set.ntokens() == ntokens - 1);
+        let (new_token_set, new_token) = add_token_bpe(&new_token_set, tokenizer_cache);
+        assert!(new_token_set.ntokens() == ntokens);
+        let new_stats = tokenizer_cache.get_stats(&new_token_set);
+
+        if new_stats.total_tokens < stats.total_tokens {
+            println!();
+            println!("{} -> {}", show_bytes(s.as_slice()), show_bytes(&new_token));
+            return Some(new_stats);
+        }
+    }
+    println!();
 
     None
 }
@@ -237,6 +263,7 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     ntokens: usize,
     bytes_optimizer: &BO,
     tokenizer_cache: &mut TokenizerCache<'a, S>,
+    removal_count: &mut HashMap<Vec<u8>, usize>,
 ) -> Option<TokenSet> {
     let stats = tokenizer_cache.get_stats(token_set);
 
@@ -253,15 +280,22 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         return Some(new_stats.token_set);
     }
 
-    if let Some(new_stats) = remove_add_token(token_set, ntokens, bytes_optimizer, tokenizer_cache) {
+    if let Some(new_stats) = remove_add_token(
+        token_set,
+        ntokens,
+        bytes_optimizer,
+        tokenizer_cache,
+        removal_count,
+    ) {
         assert!(new_stats.token_set.ntokens() <= ntokens);
         return Some(new_stats.token_set);
     }
 
-    if let Some(new_stats) = add_remove_token(token_set, ntokens, bytes_optimizer, tokenizer_cache) {
-        assert!(new_stats.token_set.ntokens() <= ntokens);
-        return Some(new_stats.token_set);
-    }
+    // if let Some(new_stats) = add_remove_token(token_set, ntokens, bytes_optimizer, tokenizer_cache)
+    // {
+    //     assert!(new_stats.token_set.ntokens() <= ntokens);
+    //     return Some(new_stats.token_set);
+    // }
 
     None
 }
@@ -279,10 +313,16 @@ fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         stats.bytes_per_token()
     );
 
+    let mut removal_count = HashMap::new();
+
     loop {
-        if let Some(new_token_set) =
-            optimization_step(&token_set, ntokens, bytes_optimizer, tokenizer_cache)
-        {
+        if let Some(new_token_set) = optimization_step(
+            &token_set,
+            ntokens,
+            bytes_optimizer,
+            tokenizer_cache,
+            &mut removal_count,
+        ) {
             token_set = new_token_set;
         } else {
             break;
@@ -323,7 +363,7 @@ pub fn optimize_tokenset<'a, S: Sampler<'a>>(
                 token_set,
                 ntokens,
                 &noop_bytes_optimizer,
-                &mut tokenizer_cache
+                &mut tokenizer_cache,
             )
         }
         TokenType::BytesHuff => unimplemented!(),

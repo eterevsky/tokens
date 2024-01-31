@@ -290,6 +290,7 @@ impl TokenSet {
     }
 
     pub fn add_token(&mut self, token: &[u8]) {
+        assert!(!token.is_empty());
         self.sequences.retain(|s| s.string != token);
         let token = Token::Str(token.to_vec());
         self.tokens.push(token);
@@ -316,6 +317,16 @@ impl TokenSet {
                 }
             }
         }
+    }
+
+    pub fn find_token(&self, s: &[u8]) -> Option<usize> {
+        self.tokens.iter().position(|token| {
+            if let Token::Str(x) = token {
+                x == s
+            } else {
+                false
+            }
+        })
     }
 
     pub fn ntokens(&self) -> usize {

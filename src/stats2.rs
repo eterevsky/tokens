@@ -77,5 +77,8 @@ impl TokenStats {
         for i in 0..self.seq_counts.len() {
             self.seq_counts[i] += other.seq_counts[i];
         }
+        for i in 0..self.pair_counts.len() {
+            self.pair_counts[i] += other.pair_counts[i];
+        }
     }
 }

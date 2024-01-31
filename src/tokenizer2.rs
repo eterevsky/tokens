@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use super::stats2::TokenStats;
 use super::tokenset::{Token, TokenSet};
 
+#[derive(Debug)]
 enum SpanContent {
     None, // Empty span
     Token(usize),
     Sequence(usize),
 }
 
+#[derive(Debug)]
 struct Span {
     content: SpanContent,
 
@@ -77,7 +79,13 @@ impl FragmentTokenizer {
         // Populate tokens
         for (idx, token) in token_set.tokens.iter().enumerate() {
             if let Token::Str(string) = token {
-                assert!(span_by_str.insert(string.clone(), spans.len()).is_none());
+                if span_by_str.insert(string.clone(), spans.len()).is_some() {
+                    dbg!(&token_set.tokens);
+                    dbg!(string);
+                    dbg!(spans);
+                    dbg!(span_by_str);
+                    panic!();
+                }
                 spans.push(Span {
                     content: SpanContent::Token(idx),
                     string: string.clone(),
