@@ -96,7 +96,7 @@ impl BytesOptimizer for HuffOptimizer {
         let mut best_token_set = None;
         let mut best_total_tokens = None;
     
-        let max_ext_tokens = min(n_byte_ext_tokens - 1, 8);
+        let max_ext_tokens = min(n_byte_ext_tokens - 1, 10);
     
         for n_ext_tokens in 2..=max_ext_tokens {
             let n_byte_tokens = n_byte_ext_tokens - n_ext_tokens;
