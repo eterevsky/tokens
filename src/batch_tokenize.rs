@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use super::input::sample::{Sample, Sampler};
 use super::stats2::TokenStats;
@@ -75,7 +74,7 @@ pub fn tokenize_file<'a, S: Sampler<'a>>(
             join_handles.push(s.spawn(|| worker(&tokenizer, jobs_rx_clone, results_tx_clone)));
         }
 
-        let start = Instant::now();
+        // let start = Instant::now();
 
         for sample in sampler.iter() {
             jobs_tx.send(sample).unwrap();
@@ -88,13 +87,13 @@ pub fn tokenize_file<'a, S: Sampler<'a>>(
             stats.merge(&result);
         }
 
-        if stats.scanned_bytes > 1 << 34 {
-            let elapsed = std::time::Instant::now() - start;
-            println!(
-                "\rAvg pace: {:.1} MB / s",
-                stats.scanned_bytes as f64 / 1000000.0 / elapsed.as_secs_f64()
-            );
-        }
+        // if stats.scanned_bytes > 1 << 34 {
+        //     let elapsed = std::time::Instant::now() - start;
+        //     println!(
+        //         "\rAvg pace: {:.1} MB / s",
+        //         stats.scanned_bytes as f64 / 1000000.0 / elapsed.as_secs_f64()
+        //     );
+        // }
 
         while !join_handles.is_empty() {
             join_handles.pop().unwrap().join().unwrap();

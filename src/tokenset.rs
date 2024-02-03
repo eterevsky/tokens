@@ -39,7 +39,7 @@ impl fmt::Display for TokenType {
 }
 
 /// A single token that will be part of the final tokenization.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Token {
     /// A token representing a string of bytes.
     Str(Vec<u8>),
@@ -97,6 +97,15 @@ impl Ord for Token {
 impl PartialOrd for Token {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Token::Ext(x) => write!(f, "{}", x),
+            Token::Str(s) => write!(f, "{}", show_bytes(s)),
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
@@ -20,6 +20,25 @@ fn is_valid_token(s: &[u8]) -> bool {
     }
 
     true
+}
+
+fn show_tokenset_diff(before: &TokenSet, after: &TokenSet) -> String {
+    let mut before_set = HashSet::new();
+    let mut after_set = HashSet::new();
+
+    for token in before.tokens.iter() {
+        before_set.insert(token.clone());
+    }
+    for token in after.tokens.iter() {
+        after_set.insert(token.clone());
+    }
+
+    let mut removed = before_set.difference(&after_set).map(|t| t.to_string()).collect::<Vec<_>>();
+    removed.sort();
+    let mut added = after_set.difference(&before_set).map(|t| t.to_string()).collect::<Vec<_>>();
+    added.sort();
+
+    format!("{} -> {}", removed.join(" "), added.join(" "))
 }
 
 fn add_token_bpe<'a, S: Sampler<'a>>(
@@ -151,10 +170,11 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         let new_token_set =
             BO::optimize_bytes(&stats, token_set.ntokens() - token_set.n_long_tokens() - 1);
         assert!(new_token_set.ntokens() == ntokens - 1);
-        if let Some((new_token_set, new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
+        if let Some((new_token_set, _new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
             let new_stats = tokenizer_cache.get_stats(&new_token_set);
             if new_stats.total_tokens < stats.total_tokens {
-                println!("Added {}", show_bytes(&new_token));
+                println!("{}", show_tokenset_diff(token_set, &new_token_set));
+                println!("processed bytes / token: {}", new_stats.bytes_per_token());
                 return Some(new_stats);
             }
         }
@@ -180,13 +200,14 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         new_token_set.remove_token(token_idx);
         assert!(new_token_set.ntokens() == ntokens - 1);
 
-        if let Some((new_token_set, new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
+        if let Some((new_token_set, _new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
             assert!(new_token_set.ntokens() == ntokens);
             let new_stats = tokenizer_cache.get_stats(&new_token_set);
 
             if new_stats.total_tokens < stats.total_tokens {
                 println!();
-                println!("{} -> {}", show_bytes(s.as_slice()), show_bytes(&new_token));
+                println!("{}", show_tokenset_diff(token_set, &new_token_set));
+                println!("processed bytes / token: {}", new_stats.bytes_per_token());
                 return Some(new_stats);
             }
         }
@@ -208,10 +229,9 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     let new_token_set = BO::optimize_bytes(&stats, ntokens - token_set.n_long_tokens());
     let new_stats = tokenizer_cache.get_stats(&new_token_set);
     if new_stats.total_tokens < stats.total_tokens {
-        println!(
-            "Updated encoding of single bytes. New bytes/token: {}",
-            stats.bytes_per_token()
-        );
+        println!("{}", show_tokenset_diff(token_set, &new_token_set));
+        println!("processed bytes / token: {}", stats.bytes_per_token());
+
         return Some(new_stats.token_set);
     }
 
