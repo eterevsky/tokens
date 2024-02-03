@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::batch_tokenize::TokenizerCache;
 use crate::input::sample::Sampler;
@@ -225,12 +226,12 @@ fn optimization_step<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     removal_count: &mut HashMap<Vec<u8>, usize>,
 ) -> Option<TokenSet> {
     let stats = tokenizer_cache.get_stats(token_set);
-
     let new_token_set = BO::optimize_bytes(&stats, ntokens - token_set.n_long_tokens());
     let new_stats = tokenizer_cache.get_stats(&new_token_set);
+
     if new_stats.total_tokens < stats.total_tokens {
         println!("{}", show_tokenset_diff(token_set, &new_token_set));
-        println!("processed bytes / token: {}", stats.bytes_per_token());
+        println!("processed bytes / token: {}", new_stats.bytes_per_token());
 
         return Some(new_stats.token_set);
     }
@@ -277,6 +278,7 @@ fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     );
 
     let mut removal_count = HashMap::new();
+    let mut last_save = Instant::now();
 
     loop {
         if let Some(new_token_set) = optimization_step(
@@ -287,7 +289,10 @@ fn optimize_tokenset_impl<'a, S: Sampler<'a>, BO: BytesOptimizer>(
             &mut removal_count,
         ) {
             token_set = new_token_set;
-            save_tokens(&token_set, tokens_dir);
+            if Instant::now() - last_save > Duration::from_secs(60) {
+                save_tokens(&token_set, tokens_dir);
+                last_save = Instant::now();
+            }
         } else {
             break;
         }
