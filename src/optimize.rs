@@ -34,27 +34,30 @@ fn show_tokenset_diff(before: &TokenSet, after: &TokenSet) -> String {
         after_set.insert(token.clone());
     }
 
-    let mut removed = before_set.difference(&after_set).map(|t| t.to_string()).collect::<Vec<_>>();
+    let mut removed = before_set
+        .difference(&after_set)
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>();
     removed.sort();
-    let mut added = after_set.difference(&before_set).map(|t| t.to_string()).collect::<Vec<_>>();
+    let mut added = after_set
+        .difference(&before_set)
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>();
     added.sort();
 
     format!("{} -> {}", removed.join(" "), added.join(" "))
 }
 
-fn add_token_bpe<'a, S: Sampler<'a>>(
-    token_set: &TokenSet,
-    tokenizer_cache: &mut TokenizerCache<'a, S>,
-) -> Option<(TokenSet, Vec<u8>)> {
-    let stats = tokenizer_cache.get_stats_with_pairs(token_set);
+fn add_token_bpe(stats: &TokenStats) -> Option<(TokenSet, i64)> {
     let mut pairs = (0..stats.pair_counts.len())
         .filter(|&i| stats.pair_counts[i] > 0)
         .collect::<Vec<usize>>();
     pairs.sort_by_key(|&i| -(stats.pair_counts[i] as i64));
 
     let mut new_token = Vec::new();
+    let mut token_count = 0;
 
-    for pair_idx in pairs.iter() {
+    for &pair_idx in pairs.iter() {
         let itoken1 = pair_idx / stats.ntokens();
         let itoken2 = pair_idx % stats.ntokens();
 
@@ -69,87 +72,107 @@ fn add_token_bpe<'a, S: Sampler<'a>>(
         };
 
         if is_valid_token(&new_token) {
+            token_count = stats.pair_counts[pair_idx];
             break;
         }
     }
 
     if new_token.is_empty() {
-        dbg!(&token_set.tokens);
-        dbg!(stats.token_counts);
-        dbg!(stats.pair_counts);
+        dbg!(&stats.token_set.tokens);
+        dbg!(&stats.token_counts);
+        dbg!(&stats.pair_counts);
 
         return None;
     }
 
-    let mut new_token_set = token_set.clone();
-    new_token_set.add_token(&new_token);
+    let mut new_tokenset = stats.token_set.clone();
+    new_tokenset.add_token(&new_token);
 
-    Some((new_token_set, new_token))
+    Some((new_tokenset, token_count as i64))
 }
 
-fn add_remove_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
-    token_set: &TokenSet,
-    ntokens: usize,
-    _bytes_optimizer: &BO,
-    tokenizer_cache: &mut TokenizerCache<'a, S>,
-) -> Option<TokenStats> {
-    let add_bpe_res = add_token_bpe(token_set, tokenizer_cache);
-    if add_bpe_res.is_none() {
+fn count_tokens_in_bytes(tokenset: &TokenSet, stats: &TokenStats) -> u64 {
+    let mut byte_cost: [Option<u64>; 256] = [None; 256];
+
+    for token in tokenset.tokens.iter() {
+        if let Token::Str(s) = token {
+            if s.len() == 1 {
+                let byte = s[0];
+                assert!(byte_cost[byte as usize].is_none());
+                byte_cost[byte as usize] = Some(1);
+            }
+        }
+    }
+
+    for seq in tokenset.sequences.iter() {
+        if seq.string.len() == 1 {
+            let byte = seq.string[0];
+            assert!(byte_cost[byte as usize].is_none());
+            byte_cost[byte as usize] = Some(seq.tokens.len() as u64);
+        }
+    }
+
+    let mut total = 0;
+
+    for (i, token) in stats.token_set.tokens.iter().enumerate() {
+        if let Token::Str(s) = token {
+            if s.len() == 1 {
+                let byte = s[0];
+                total += byte_cost[byte as usize].unwrap() * stats.token_counts[i];
+            }
+        }
+    }
+
+    for (i, seq) in stats.token_set.sequences.iter().enumerate() {
+        if seq.string.len() == 1 {
+            let byte = seq.string[0];
+            total += byte_cost[byte as usize].unwrap() * stats.seq_counts[i];
+        }
+    }
+
+    total
+}
+
+fn add_byte<BO: BytesOptimizer>(
+    stats: &TokenStats,
+    bytes_optimizer: &BO,
+) -> Option<(TokenSet, i64)> {
+    let old_count = count_tokens_in_bytes(&stats.token_set, stats);
+    let new_tokenset = BO::optimize_bytes(
+        &stats,
+        stats.token_set.ntokens() - stats.token_set.n_long_tokens() + 1,
+    );
+
+    if new_tokenset.ntokens() == stats.token_set.ntokens() {
         return None;
     }
-    let (new_token_set, new_token) = add_bpe_res.unwrap();
-    println!("Trying to add token {}", show_bytes(&new_token));
-    let stats = tokenizer_cache.get_stats(token_set);
 
-    if new_token_set.ntokens() <= ntokens {
-        let new_stats = tokenizer_cache.get_stats(&new_token_set);
-        if new_stats.total_tokens < stats.total_tokens {
-            println!("Added token {}", show_bytes(&new_token));
-            return Some(new_stats.clone());
-        }
-    } else {
-        assert_eq!(new_token_set.ntokens(), ntokens + 1);
+    let new_count = count_tokens_in_bytes(&new_tokenset, stats);
+    Some((new_tokenset, old_count as i64 - new_count as i64))
+}
 
-        if ntokens - new_token_set.n_long_tokens() >= new_token_set.min_bytes_ext_tokens() {
-            let new_stats = tokenizer_cache.get_stats(&new_token_set);
-            let token_set_new_bytes =
-                BO::optimize_bytes(&new_stats, ntokens - new_token_set.n_long_tokens());
-            let new_stats = tokenizer_cache.get_stats(&token_set_new_bytes);
-            if new_stats.total_tokens < stats.total_tokens {
-                println!(
-                    "Added token {} and updated 1-byte tokens",
-                    show_bytes(&new_token)
-                );
-                return Some(new_stats.clone());
+fn add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
+    tokenset: &TokenSet,
+    bytes_optimizer: &BO,
+    tokenizer_cache: &mut TokenizerCache<'a, S>,
+) -> Option<TokenSet> {
+    let stats = tokenizer_cache.get_stats_with_pairs(tokenset);
+
+    let maybe_tokenset_byte = add_byte(&stats, bytes_optimizer);
+    let maybe_tokenset_token = add_token_bpe(&stats);
+
+    match (maybe_tokenset_byte, maybe_tokenset_token) {
+        (None, None) => None,
+        (Some((new_token_set, _)), None) => Some(new_token_set),
+        (None, Some((new_token_set, _))) => Some(new_token_set),
+        (Some((token_set_byte, byte_count)), Some((token_set_token, token_count))) => {
+            if byte_count > token_count {
+                Some(token_set_byte)
+            } else {
+                Some(token_set_token)
             }
         }
-
-        print!("Trying to remove tokens:");
-        for (token_idx, token) in new_token_set.tokens.iter().enumerate() {
-            if let Token::Str(s) = token {
-                if s.len() > 1 && s != &new_token {
-                    print!(" {}", show_bytes(&s));
-                    std::io::stdout().flush().unwrap();
-                    let mut newer_token_set = new_token_set.clone();
-                    newer_token_set.remove_token(token_idx);
-
-                    let newer_stats = tokenizer_cache.get_stats(&newer_token_set);
-                    let newer_token_set =
-                        BO::optimize_bytes(&newer_stats, ntokens - newer_token_set.n_long_tokens());
-                    let newer_stats = tokenizer_cache.get_stats(&newer_token_set);
-
-                    if newer_stats.total_tokens < stats.total_tokens {
-                        println!();
-                        println!("Removed {}", show_bytes(s));
-                        return Some(newer_stats.clone());
-                    }
-                }
-            }
-        }
-        println!()
     }
-
-    None
 }
 
 fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
@@ -160,10 +183,18 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     removal_count: &mut HashMap<Vec<u8>, usize>,
 ) -> Option<TokenStats> {
     if token_set.ntokens() < ntokens {
-        return add_remove_token(token_set, ntokens, bytes_optimizer, tokenizer_cache);
+        if let Some(new_tokenset) = add_token(token_set, bytes_optimizer, tokenizer_cache) {
+            let stats = tokenizer_cache.get_stats(&new_tokenset);
+            println!("{}", show_tokenset_diff(token_set, &new_tokenset));
+            println!("processed bytes / token: {}", stats.bytes_per_token());
+            return Some(stats);
+        } else {
+            return None;
+        }
     }
 
     assert_eq!(token_set.ntokens(), ntokens);
+    let stats = tokenizer_cache.get_stats_with_pairs(token_set);
 
     let stats = tokenizer_cache.get_stats(token_set);
 
@@ -171,7 +202,8 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         let new_token_set =
             BO::optimize_bytes(&stats, token_set.ntokens() - token_set.n_long_tokens() - 1);
         assert!(new_token_set.ntokens() == ntokens - 1);
-        if let Some((new_token_set, _new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
+        let new_stats = tokenizer_cache.get_stats_with_pairs(&new_token_set);
+        if let Some((new_token_set, _)) = add_token_bpe(&new_stats) {
             let new_stats = tokenizer_cache.get_stats(&new_token_set);
             if new_stats.total_tokens < stats.total_tokens {
                 println!("{}", show_tokenset_diff(token_set, &new_token_set));
@@ -201,15 +233,13 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
         new_token_set.remove_token(token_idx);
         assert!(new_token_set.ntokens() == ntokens - 1);
 
-        if let Some((new_token_set, _new_token)) = add_token_bpe(&new_token_set, tokenizer_cache) {
-            assert!(new_token_set.ntokens() == ntokens);
-            let new_stats = tokenizer_cache.get_stats(&new_token_set);
-
-            if new_stats.total_tokens < stats.total_tokens {
+        if let Some(newer_tokenset) = add_token(&new_token_set, bytes_optimizer, tokenizer_cache) {
+            let newer_stats = tokenizer_cache.get_stats(&newer_tokenset);
+            if newer_stats.total_tokens < stats.total_tokens {
                 println!();
-                println!("{}", show_tokenset_diff(token_set, &new_token_set));
-                println!("processed bytes / token: {}", new_stats.bytes_per_token());
-                return Some(new_stats);
+                println!("{}", show_tokenset_diff(token_set, &newer_tokenset));
+                println!("processed bytes / token: {}", newer_stats.bytes_per_token());
+                return Some(newer_stats);
             }
         }
     }
