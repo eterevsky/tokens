@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::batch_tokenize::TokenizerCache;
+use crate::batch_tokenize::{TokenizerCache, tokenize_file};
 use crate::input::sample::Sampler;
 use crate::optimize_bytes::{
     BytesOptimizer, HuffOptimizer, NoopBytesOptimizer, SimpleBytesOptimizer,
@@ -135,7 +135,7 @@ fn count_tokens_in_bytes(tokenset: &TokenSet, stats: &TokenStats) -> u64 {
 
 fn add_byte<BO: BytesOptimizer>(
     stats: &TokenStats,
-    bytes_optimizer: &BO,
+    _bytes_optimizer: &BO,
 ) -> Option<(TokenSet, i64)> {
     let old_count = count_tokens_in_bytes(&stats.token_set, stats);
     let new_tokenset = BO::optimize_bytes(
@@ -194,8 +194,6 @@ fn remove_add_token<'a, S: Sampler<'a>, BO: BytesOptimizer>(
     }
 
     assert_eq!(token_set.ntokens(), ntokens);
-    let stats = tokenizer_cache.get_stats_with_pairs(token_set);
-
     let stats = tokenizer_cache.get_stats(token_set);
 
     if token_set.ntokens() - token_set.n_long_tokens() > token_set.min_bytes_ext_tokens() {
@@ -387,5 +385,47 @@ pub fn optimize_tokenset<'a, S: Sampler<'a>>(
                 tokens_dir,
             )
         }
+    }
+}
+
+pub struct Optimizer {
+    ntokens: usize,
+    processing: Processing,
+    token_type: TokenType,
+    unprocessed_data_size: Option<u64>,
+    tokens_dir: Box<Path>,
+}
+
+impl Optimizer {
+    pub fn new(
+        ntokens: usize,
+        processing: Processing,
+        token_type: TokenType,
+        unprocessed_data_size: Option<u64>,
+        tokens_dir: &Path,
+     ) -> Self {
+        Self {
+            ntokens,
+            processing,
+            token_type,
+            unprocessed_data_size,
+            tokens_dir: tokens_dir.into(),
+        }
+    }
+
+    pub fn optimize<'a>(&self, sampler: &'a impl Sampler<'a>, pretrained_token_set: Option<TokenSet>) -> TokenStats {
+        optimize_tokenset(
+            self.ntokens,
+            sampler,
+            self.processing,
+            self.token_type,
+            self.unprocessed_data_size,
+            pretrained_token_set,
+            &self.tokens_dir,
+        )
+    }
+
+    pub fn get_stats<'a>(&self, sampler:  &'a impl Sampler<'a>, tokenset: &TokenSet) -> TokenStats {
+        tokenize_file(tokenset, sampler, self.unprocessed_data_size)
     }
 }

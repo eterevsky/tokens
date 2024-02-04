@@ -19,9 +19,9 @@ mod tokenset;
 
 use self::input::file_sampler::FileSampler;
 use self::input::memory_sampler::MemorySampler;
-use self::optimize::optimize_tokenset;
 use self::processing::{process_file, Processing};
-use self::tokenset::{TokenType, TokenSet};
+use self::stats2::TokenStats;
+use self::tokenset::{TokenSet, TokenType};
 
 fn maybe_process_file(
     filename_raw: &str,
@@ -140,6 +140,61 @@ fn load_save_tokens(
     std::fs::write(&output_path, serialized).unwrap();
 }
 
+fn save_tokens(stats: &TokenStats, tokens_dir: &Path) {
+    let output_path = tokens_dir.join(format!("{}.json", stats.token_set.name()));
+    println!("Writing the token set to {}.", output_path.display());
+    let serialized = serde_json::to_string(&stats.to_json()).unwrap();
+    std::fs::write(&output_path, serialized).unwrap();
+}
+
+fn optimize_with_increasing_data(
+    optimizer: &optimize::Optimizer,
+    filename: &str,
+    min_data_size: usize,
+    input_token_set: Option<TokenSet>,
+) -> TokenStats {
+    let full_sampler = FileSampler::new(filename, 1 << 24, None);
+    let full_size = std::fs::metadata(filename).unwrap().len() as usize;
+    let mut tokenset = input_token_set;
+    let mut size = min_data_size;
+    let mut full_stats = None;
+
+    while size < full_size {
+        let sampler = MemorySampler::sample_from_file(filename, size, 1 << 20);
+        println!("Optimizing with {} bytes of data.", sampler.total_size());
+
+        if let Some(tokenset) = tokenset.as_ref() {
+            let stats = optimizer.get_stats(&sampler, tokenset);
+            println!("bytes / token (bigger data): {}", stats.bytes_per_token());
+        }
+
+        let stats = optimizer.optimize(&sampler, tokenset);
+        println!("bytes / token (optimized): {}", stats.bytes_per_token());
+
+        full_stats = optimizer.get_stats(&full_sampler, &stats.token_set);
+        println!(
+            "bytes / token (full data): {}",
+            full_stats.bytes_per_token()
+        );
+
+        if size > 1 << 24
+            && (stats.bytes_per_token() - full_stats.bytes_per_token()).abs()
+                / full_stats.bytes_per_token()
+                < 0.005
+        {
+            println!("The difference is less than 0.5%. Stopping.");
+            tokenset = Some(stats.token_set);
+            break;
+        }
+
+        tokenset = Some(stats.token_set);
+
+        size *= 2;
+    }
+
+    full_stats
+}
+
 fn optimize(
     ntokens: usize,
     filename_raw: &str,
@@ -148,6 +203,7 @@ fn optimize(
     processing: Processing,
     token_type: TokenType,
     input_tokens: Option<&str>,
+    min_data_size: Option<usize>,
 ) {
     let tokens_dir_path = Path::new(tokens_dir);
 
@@ -161,39 +217,31 @@ fn optimize(
         None
     };
 
-    println!("Opening {}", &filename);
-    let stats = if initial_size < 1 << 34 {
-        let sampler = MemorySampler::from_file(&filename, 1<<20);
-    
-        println!("Optimizing a token set with {} tokens", ntokens);
-        optimize_tokenset(
-            ntokens,
-            &sampler,
-            processing,
-            token_type,
-            Some(initial_size),
+    println!(
+        "Optimizing a token set with {} tokens from data in {}",
+        ntokens, &filename
+    );
+
+    let optimizer = optimize::Optimizer::new(
+        ntokens,
+        processing,
+        token_type,
+        Some(initial_size),
+        &tokens_dir_path,
+    );
+
+    let stats = if let Some(min_data_size) = min_data_size {
+        optimize_with_increasing_data(&optimizer, &filename, min_data_size, input_token_set)
+    } else if initial_size < 1 << 34 {
+        optimizer.optimize(
+            &MemorySampler::from_file(&filename, 1 << 20),
             input_token_set,
-            &tokens_dir_path,
         )
     } else {
-        let sampler = FileSampler::new(&filename, 1 << 24, None);
-    
-        println!("Optimizing a token set with {} tokens", ntokens);
-        optimize_tokenset(
-            ntokens,
-            &sampler,
-            processing,
-            token_type,
-            Some(initial_size),
-            input_token_set,
-            &tokens_dir_path,
-        )
-       };
+        optimizer.optimize(&FileSampler::new(&filename, 1 << 24, None), input_token_set)
+    };
 
-    let output_path = tokens_dir_path.join(format!("{}.json", stats.token_set.name()));
-    println!("Writing the token set to {}.", output_path.display());
-    let serialized = serde_json::to_string(&stats.to_json()).unwrap();
-    std::fs::write(&output_path, serialized).unwrap();
+    save_tokens(&stats, tokens_dir_path);
 }
 
 #[derive(Parser, Debug)]
@@ -252,6 +300,12 @@ enum Command {
 
         #[arg(short, long)]
         input_tokens: Option<String>,
+
+        /// The tokenset will initially be optimized using a smaller dataet
+        /// extracted from the full data. This option specifies the initial
+        /// size of the sample that will be extracted from the full data.
+        #[arg(long)]
+        min_data_size: Option<usize>,
     },
 }
 
@@ -274,6 +328,7 @@ fn main() {
             token_type,
             ntokens,
             input_tokens,
+            min_data_size,
         } => optimize(
             *ntokens,
             data,
@@ -282,6 +337,7 @@ fn main() {
             *processing,
             *token_type,
             input_tokens.as_deref(),
+            *min_data_size,
         ),
 
         Command::Process { data, output } => process(data.as_str(), output.as_str()),
