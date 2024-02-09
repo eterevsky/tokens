@@ -21,6 +21,7 @@ use self::input::file_sampler::FileSampler;
 use self::input::memory_sampler::MemorySampler;
 use self::processing::{process_file, Processing};
 use self::stats2::TokenStats;
+use self::input::sample::Sampler;
 use self::tokenset::{TokenSet, TokenType};
 
 fn maybe_process_file(
@@ -171,19 +172,19 @@ fn optimize_with_increasing_data(
         let stats = optimizer.optimize(&sampler, tokenset);
         println!("bytes / token (optimized): {}", stats.bytes_per_token());
 
-        full_stats = optimizer.get_stats(&full_sampler, &stats.token_set);
+        let new_full_stats = optimizer.get_stats(&full_sampler, &stats.token_set);
         println!(
             "bytes / token (full data): {}",
-            full_stats.bytes_per_token()
+            new_full_stats.bytes_per_token()
         );
 
         if size > 1 << 24
-            && (stats.bytes_per_token() - full_stats.bytes_per_token()).abs()
-                / full_stats.bytes_per_token()
+            && (stats.bytes_per_token() - new_full_stats.bytes_per_token()).abs()
+                / new_full_stats.bytes_per_token()
                 < 0.005
         {
             println!("The difference is less than 0.5%. Stopping.");
-            tokenset = Some(stats.token_set);
+            full_stats = Some(new_full_stats);
             break;
         }
 
@@ -192,7 +193,7 @@ fn optimize_with_increasing_data(
         size *= 2;
     }
 
-    full_stats
+    full_stats.unwrap()
 }
 
 fn optimize(
